@@ -97,10 +97,11 @@ class DataHelpers:
 
     def data_cleaning(self, text, remove_stop_words=False):
         # Clean the text, with the option to remove stop_words and to stem words.
-        stop_words = ['the']
+        stop_words = ['我', '你', '还', '会', '因为', '所以', '这', '是', '和',
+                      '了', '的', '也', '', '', '']
 
         # Clean the text
-        text = re.sub(r"[^A-Za-z0-9]", " ", text)
+        text = re.sub(r"[0-9]", " ", text)
 
         # Remove punctuation from text
         # text = ''.join([c for c in text if c not in punctuation])
@@ -133,12 +134,15 @@ class DataHelpers:
             seg_list = jieba.cut(sentence, cut_all=False)
             # print("Default Mode: " + "/ ".join(seg_list))  # 精确模式
             sentence_seg = ' '.join(seg_list)
-            sentence_seq.append(self.data_cleaning(sentence_seg))
+            sentence_clean = self.data_cleaning(sentence_seg)
+            # print(sentence_clean)
+            sentence_seq.append(sentence_clean)
             if len(sentence_seq) % 1000 == 0:
                 progress = len(sentence_seq) / len(data) * 100
                 print("{} is {}% complete.".format('sentence sequence ', round(progress, 1)))
 
         data['sentence_seq'] = sentence_seq
+        # print(data['sentence_seq'])
 
         return data
 
@@ -694,6 +698,7 @@ class Train:
 
         # 数据切分
         data = DataHelpers().sentence_cut(data=data, dict=True)
+        data[['sentence_seq']].to_csv('D:/Data/sentence/train.csv', encoding='utf8', index=False)
 
         # Build vocabulary
         # max_document_length = max([len(x.split(" ")) for x in x_text])
