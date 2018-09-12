@@ -15,6 +15,8 @@ from keras.utils import to_categorical
 import tensorflow as tf
 FLAGS = tf.flags.FLAGS
 from tensorflow.contrib import learn
+from tensorflow.contrib.rnn import LSTMCell
+from tensorflow.contrib import rnn
 from nltk.stem import SnowballStemmer
 import re
 import jieba
@@ -38,18 +40,22 @@ tf.flags.DEFINE_string("positive_data_file", "./data/rt-polaritydata/rt-polarity
 tf.flags.DEFINE_string("negative_data_file", "./data/rt-polaritydata/rt-polarity.neg", "Data source for the negative data.")
 
 # Model Hyperparameters
-tf.flags.DEFINE_integer("num_class", 10, "number of classes (default: 2)")
+tf.flags.DEFINE_integer("subject_class", 10, "number of classes (default: 2)")
+tf.flags.DEFINE_integer("sentiment_class", 3, "number of classes (default: 2)")
 tf.flags.DEFINE_float("lr", 0.002, "learning rate (default: 0.002)")
 tf.flags.DEFINE_integer("embedding_dim", 150, "Dimensionality of character embedding (default: 128)")
-tf.flags.DEFINE_integer("sentence_len", 20, "Maximum length for sentence pair (default: 50)")
+tf.flags.DEFINE_integer("sentence_len", 30, "Maximum length for sentence pair (default: 50)")
 tf.flags.DEFINE_string("filter_sizes", "3,4,5", "Comma-separated filter sizes (default: '3,4,5')")
 tf.flags.DEFINE_integer("num_filters", 128, "Number of filters per filter size (default: 128)")
 tf.flags.DEFINE_float("dropout_keep_prob", 0.5, "Dropout keep probability (default: 0.5)")
 tf.flags.DEFINE_float("l2_reg_lambda", 0.0, "L2 regularization lambda (default: 0.0)")
 
+# LSTM Hyperparameters
+tf.flags.DEFINE_integer("hidden_dim", 128, "Number of filters per filter size (default: 128)")
+
 # Training parameters
 tf.flags.DEFINE_integer("batch_size", 128, "Batch Size (default: 64)")
-tf.flags.DEFINE_integer("num_epochs", 200, "Number of training epochs (default: 200)")
+tf.flags.DEFINE_integer("num_epochs", 300, "Number of training epochs (default: 200)")
 tf.flags.DEFINE_integer("evaluate_every", 300, "Evaluate model on dev set after this many steps (default: 100)")
 tf.flags.DEFINE_integer("checkpoint_every", 300, "Save model after this many steps (default: 100)")
 tf.flags.DEFINE_integer("num_checkpoints", 5, "Number of checkpoints to store (default: 5)")
@@ -97,8 +103,8 @@ class DataHelpers:
 
     def data_cleaning(self, text, remove_stop_words=False):
         # Clean the text, with the option to remove stop_words and to stem words.
-        stop_words = ['我', '你', '还', '会', '因为', '所以', '这', '是', '和',
-                      '了', '的', '也', '', '', '']
+        stop_words = [' ', '我', '你', '还', '会', '因为', '所以', '这', '是', '和',
+                      '了', '的', '也', '哦']
 
         # Clean the text
         text = re.sub(r"[0-9]", " ", text)
@@ -134,7 +140,7 @@ class DataHelpers:
             seg_list = jieba.cut(sentence, cut_all=False)
             # print("Default Mode: " + "/ ".join(seg_list))  # 精确模式
             sentence_seg = ' '.join(seg_list)
-            sentence_clean = self.data_cleaning(sentence_seg)
+            sentence_clean = self.data_cleaning(sentence_seg, remove_stop_words=True)
             # print(sentence_clean)
             sentence_seq.append(sentence_clean)
             if len(sentence_seq) % 1000 == 0:
@@ -457,13 +463,26 @@ class TextCNN(object):
 
         with tf.device('/cpu:0'), tf.name_scope("embedding"):
             self.W = tf.Variable(tf.random_uniform([self.vocab_size, self.embedding_size], -1.0, 1.0), name="W_emb")
+            print(self.W)
             self.embedded_chars = tf.nn.embedding_lookup(self.W, self.input_x)
             self.embedded_chars_expanded = tf.expand_dims(self.embedded_chars, -1)
+            print(self.embedded_chars_expanded)
 
-        branch_am_cnn = self.branch_am_cnn(self.embedded_chars_expanded)
+        h_conv1, pooled_2, pooled_3 = self.branch_am_cnn(self.embedded_chars_expanded)
 
-        self.h_pool_flat = tf.contrib.layers.flatten(branch_am_cnn)
+        self.h_pool_flat = tf.contrib.layers.flatten(pooled_3)
         print(self.h_pool_flat)
+
+        # self.h_pool_flat_1 = tf.contrib.layers.flatten(h_conv1)
+        # print(self.h_pool_flat_1)
+        # self.h_pool_flat_2 = tf.contrib.layers.flatten(pooled_2)
+        # print(self.h_pool_flat_2)
+        # self.h_pool_flat_3 = tf.contrib.layers.flatten(pooled_3)
+        # print(self.h_pool_flat_3)
+        # self.h_pool_flat = tf.concat([self.h_pool_flat_1, self.h_pool_flat_2, self.h_pool_flat_3], axis=1)
+        # print(self.h_pool_flat)
+        # pool_output = tf.reduce_mean(pool_output, axis=[1, 3])
+        # print(pool_output)
 
         # Add dropout
         with tf.name_scope("dropout1"):
@@ -471,7 +490,7 @@ class TextCNN(object):
             print(self.h_drop_1)
 
         with tf.name_scope("fc1"):
-            W_fc1 = tf.get_variable("W_fc1", shape=[256, 128], initializer=tf.contrib.layers.xavier_initializer())
+            W_fc1 = tf.get_variable("W_fc1", shape=[896, 128], initializer=tf.contrib.layers.xavier_initializer())
             b_fc1 = tf.Variable(tf.constant(0.1, shape=[128]), name="b_fc1")
             # self.l2_loss_fc1 += tf.nn.l2_loss(W_fc1)
             # self.l2_loss_fc1 += tf.nn.l2_loss(b_fc1)
@@ -506,7 +525,7 @@ class TextCNN(object):
 
     def branch_am_cnn(self, embedded_chars_expanded):
         filter_size_1, filter_size_2, filter_size_3 = 3, 3, 3
-        num_filters_1, num_filters_2, num_filters_3 = 64, 128, 128
+        num_filters_1, num_filters_2, num_filters_3 = 64, 64, 128
         with tf.name_scope("conv-maxpool-%s" % filter_size_1):
             # Convolution Layer
             filter_shape = [filter_size_1, self.embedding_size, 1, num_filters_1]
@@ -514,14 +533,16 @@ class TextCNN(object):
             b = tf.Variable(tf.constant(0.1, shape=[num_filters_1]), name="b")
             conv = tf.nn.conv2d(embedded_chars_expanded, W, strides=[1, 1, self.embedding_size, 1], padding="SAME", name="conv1")
             # Apply nonlinearity
-            h = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu1")
+            h_conv1 = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu1")
 
             # Maxpooling over the outputs
             # pooled = tf.nn.max_pool(h, ksize=[1, self.sequence_length_left - filter_size_1 + 1, 1, 1], strides=[1, 1, 1, 1], padding='VALID', name="pool")
-            pooled = tf.nn.max_pool(h, ksize=[1, 2, 1, 1], strides=[1, 2, 1, 1], padding='VALID', name="pool1")
-            print(h)
-            print(pooled)
+            # pooled_1 = tf.nn.max_pool(h_conv1, ksize=[1, 2, 1, 1], strides=[1, 2, 1, 1], padding='VALID', name="pool1")
+            print(h_conv1)
+            # print(pooled)
             # pooled_outputs.append(pooled)
+            # Add dropout
+            h_conv1 = tf.nn.dropout(h_conv1, self.dropout_keep_prob)
 
         with tf.name_scope("conv-maxpool-%s" % filter_size_2):
             # Convolution Layer
@@ -529,14 +550,15 @@ class TextCNN(object):
             filter_shape = [filter_size_2, 1, num_filters_1, num_filters_2]
             W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.1), name="W")
             b = tf.Variable(tf.constant(0.1, shape=[num_filters_2]), name="b")
-            conv = tf.nn.conv2d(pooled, W, strides=[1, 1, 1, 1], padding="SAME", name="conv2")
+            conv = tf.nn.conv2d(h_conv1, W, strides=[1, 1, 1, 1], padding="SAME", name="conv2")
             # Apply nonlinearity
-            h = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu2")
+            h_conv2 = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu2")
             # Maxpooling over the outputs
             # pooled = tf.nn.max_pool(h, ksize=[1, self.sequence_length_left - filter_size_2 + 1, 1, 1], strides=[1, 1, 1, 1], padding='VALID', name="pool")
-            pooled = tf.nn.max_pool(h, ksize=[1, 2, 1, 1], strides=[1, 2, 1, 1], padding='VALID', name="pool2")
-            print(h)
-            print(pooled)
+            pooled_2 = tf.nn.max_pool(h_conv2, ksize=[1, 2, 1, 1], strides=[1, 2, 1, 1], padding='VALID', name="pool2")
+            print(h_conv2)
+            print(pooled_2)
+            pooled_2 = tf.nn.dropout(pooled_2, self.dropout_keep_prob)
 
         with tf.name_scope("conv-maxpool-%s" % filter_size_3):
             # Convolution Layer
@@ -544,29 +566,43 @@ class TextCNN(object):
             filter_shape = [filter_size_3, 1, num_filters_2, num_filters_3]
             W = tf.Variable(tf.truncated_normal(filter_shape, stddev=0.1), name="W")
             b = tf.Variable(tf.constant(0.1, shape=[num_filters_3]), name="b")
-            conv = tf.nn.conv2d(pooled, W, strides=[1, 1, 1, 1], padding="SAME", name="conv3")
+            conv = tf.nn.conv2d(pooled_2, W, strides=[1, 1, 1, 1], padding="SAME", name="conv3")
             # Apply nonlinearity
-            h = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu3")
+            h_conv3 = tf.nn.relu(tf.nn.bias_add(conv, b), name="relu3")
             # Maxpooling over the outputs
             # pooled = tf.nn.max_pool(h, ksize=[1, self.sequence_length_left - filter_size_3 + 1, 1, 1], strides=[1, 1, 1, 1], padding='VALID', name="pool")
-            pooled = tf.nn.max_pool(h, ksize=[1, 2, 1, 1], strides=[1, 2, 1, 1], padding='VALID', name="pool3")
-            print(h)
-            print(pooled)
+            pooled_3 = tf.nn.max_pool(h_conv3, ksize=[1, 2, 1, 1], strides=[1, 2, 1, 1], padding='VALID', name="pool3")
+            print(h_conv3)
+            print(pooled_3)
 
-        return pooled
+        return h_conv1, pooled_2, pooled_3
 
 
 class Train:
+    # def show_prediction(self):
+    #     dev_batches = DataHelpers().batch_iter(list(zip(x_dev, y_dev)), FLAGS.batch_size, 1)
+    #     total_dev_correct = 0
+    #     total_dev_loss = 0
+    #     print("\nEvaluation:")
+    #     for dev_batch in dev_batches:
+    #         x_dev_batch, y_dev_batch = zip(*dev_batch)
+    #         loss, dev_correct = dev_step(x_dev_batch, y_dev_batch)
+    #         total_dev_correct += dev_correct * len(y_dev_batch)
+
     def train(self, x_train, y_train, x_dev, y_dev, vocab_processor):
         with tf.Graph().as_default():
             session_conf = tf.ConfigProto(allow_soft_placement=FLAGS.allow_soft_placement, log_device_placement=FLAGS.log_device_placement)
             sess = tf.Session(config=session_conf)
             # sess = tf.Session()
             with sess.as_default():
-                cnn = TextCNN(sequence_length=x_train.shape[1],
-                    num_classes=FLAGS.num_class,
-                    vocab_size=len(vocab_processor.vocabulary_),
-                    embedding_size=FLAGS.embedding_dim)
+                # cnn = TextCNN(sequence_length=x_train.shape[1],
+                #     num_classes=FLAGS.sentiment_class,
+                #     vocab_size=len(vocab_processor.vocabulary_),
+                #     embedding_size=FLAGS.embedding_dim)
+                cnn = Text_BiLSTM(sequence_length=x_train.shape[1],
+                              num_classes=FLAGS.sentiment_class,
+                              vocab_size=len(vocab_processor.vocabulary_),
+                              embedding_size=FLAGS.embedding_dim)
 
                 # Define Training procedure
                 global_step = tf.Variable(0, name="global_step", trainable=False)
@@ -676,6 +712,8 @@ class Train:
                         path = saver.save(sess, checkpoint_prefix, global_step=current_step)
                         print("Saved model checkpoint to {}\n".format(path))
 
+                # self.show_prediction()
+
     def preprocess(self):
         # 读取训练数据
         data = pd.read_csv(FLAGS.train_data_file, sep=",", error_bad_lines=False)
@@ -703,7 +741,7 @@ class Train:
         # Build vocabulary
         # max_document_length = max([len(x.split(" ")) for x in x_text])
         max_document_length = FLAGS.sentence_len
-        vocab_processor = learn.preprocessing.VocabularyProcessor(max_document_length, min_frequency=2)
+        vocab_processor = learn.preprocessing.VocabularyProcessor(max_document_length, min_frequency=5)
         vocab_processor.fit(data['sentence_seq'])
         # x = np.array(list(vocab_processor.fit_transform(x_text)))
         x = np.array(list(vocab_processor.transform(data['sentence_seq'])))
@@ -712,8 +750,8 @@ class Train:
         subject_numerical = []
         for subject in data['subject']:
             subject_numerical.append(subject_dict[subject])
-        # y = to_categorical(data['subject'], num_classes=FLAGS.num_class)
-        y = to_categorical(subject_numerical, num_classes=FLAGS.num_class)
+        y = to_categorical(data['sentiment_value'], num_classes=FLAGS.sentiment_class)
+        # y = to_categorical(subject_numerical, num_classes=FLAGS.subject_class)
 
         shuffle_indices = np.random.permutation(np.arange(len(y)))
         x_shuffled = x[shuffle_indices]
