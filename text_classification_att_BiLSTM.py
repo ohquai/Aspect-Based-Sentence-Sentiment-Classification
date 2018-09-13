@@ -32,6 +32,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 tf.flags.DEFINE_string("train_data_file", "D:/DF/sentence_theme_based_sentiment/data/train.csv", "train data path.")
 tf.flags.DEFINE_string("dictionary", "./utils/dictionary.txt", "dictionary path.")
 tf.flags.DEFINE_string("stoplist", "./utils/stoplist.txt", "stoplist path.")
+tf.flags.DEFINE_string("pretrained_word_emb", "./utils/word2vec.txt", "stoplist path.")
 tf.flags.DEFINE_string("model_data_path", "D:/DF/sentence_theme_based_sentiment/model/", "model path for storing.")
 
 # Data loading params
@@ -44,7 +45,7 @@ tf.flags.DEFINE_integer("subject_class", 10, "number of classes (default: 2)")
 tf.flags.DEFINE_integer("sentiment_class", 3, "number of classes (default: 2)")
 tf.flags.DEFINE_integer("subject_sentiment_class", 30, "number of classes (default: 2)")
 tf.flags.DEFINE_float("lr", 0.002, "learning rate (default: 0.002)")
-tf.flags.DEFINE_integer("embedding_dim", 150, "Dimensionality of character embedding (default: 128)")
+tf.flags.DEFINE_integer("embedding_dim", 300, "Dimensionality of character embedding (default: 128)")
 tf.flags.DEFINE_integer("sentence_len", 30, "Maximum length for sentence pair (default: 50)")
 tf.flags.DEFINE_string("filter_sizes", "3,4,5", "Comma-separated filter sizes (default: '3,4,5')")
 tf.flags.DEFINE_integer("num_filters", 128, "Number of filters per filter size (default: 128)")
@@ -104,8 +105,12 @@ class DataHelpers:
 
     def data_cleaning(self, text, remove_stop_words=False):
         # Clean the text, with the option to remove stop_words and to stem words.
-        stop_words = [' ', '我', '你', '还', '会', '因为', '所以', '这', '是', '和',
-                      '了', '的', '也', '哦']
+        stop_words = [' ', '我', '你', '还', '会', '因为', '所以', '这', '是', '和', '他们',
+                      '了', '的', '也', '哦', '这个', '啊', '说', '知道', '哪里', '吧', '哪家',
+                      '想', '啥', '怎么', '呢', '那', '嘛', '么',
+                      '有', '指', '楼主', '私信', '谁', '可能', '像', '这样', '到底', '哪个', '看', '我们',
+                      '只能', '主要', '些', '认为', '肯定',
+                      ]
 
         # Clean the text
         text = re.sub(r"[0-9]", " ", text)
@@ -190,6 +195,7 @@ class Text_BiLSTM(object):
         self.input_x = tf.placeholder(tf.int32, [None, self.sequence_length], name="input_right")
         self.input_y = tf.placeholder(tf.float32, [None, self.num_classes], name="input_y")
         self.dropout_keep_prob = tf.placeholder(tf.float32, name="dropout_keep_prob")
+        self.embedding_placeholder = tf.placeholder(tf.float32, [self.vocab_size, self.embedding_size], name="pretrained_emb")
 
         # with tf.device('/cpu:0'), tf.name_scope("embedding"):
         #     self.W = tf.Variable(tf.random_uniform([self.vocab_size, self.embedding_size], -1.0, 1.0), name="W_emb")
@@ -359,14 +365,14 @@ class Text_BiLSTM(object):
 
     def lookup_layer_op(self):
         with tf.variable_scope("words"):
-            # self._word_embeddings = tf.Variable(self.embeddings,
-            #                                dtype=tf.float32,
-            #                                trainable=True,
-            #                                name="_word_embeddings")
-            self._word_embeddings = tf.Variable(tf.random_uniform([self.vocab_size, self.embedding_size], -1.0, 1.0), dtype=tf.float32, trainable=True, name="W_emb")
-            word_embeddings = tf.nn.embedding_lookup(params=self._word_embeddings,
-                                                     ids=self.input_x,
-                                                     name="word_embeddings")
+
+            # self._word_embeddings = tf.Variable(tf.random_uniform([self.vocab_size, self.embedding_size], -1.0, 1.0), dtype=tf.float32, trainable=True, name="W_emb")
+            # word_embeddings = tf.nn.embedding_lookup(params=self._word_embeddings, ids=self.input_x, name="word_embeddings")
+
+            W = tf.Variable(tf.constant(0.0, shape=[self.vocab_size, self.embedding_size]), trainable=False, name="W")
+            embedding_init = W.assign(self.embedding_placeholder)
+            word_embeddings = tf.nn.embedding_lookup(params=W, ids=self.input_x, name="word_embeddings")
+
         self.word_embeddings = tf.nn.dropout(word_embeddings, self.dropout_keep_prob)
 
 
@@ -380,8 +386,19 @@ class Train:
     #         x_dev_batch, y_dev_batch = zip(*dev_batch)
     #         loss, dev_correct = dev_step(x_dev_batch, y_dev_batch)
     #         total_dev_correct += dev_correct * len(y_dev_batch)
+    def load_word2vec(self, filename):
+        vocab = []
+        embd = []
+        file = open(filename, 'r', encoding='utf8')
+        for line in file.readlines():
+            row = line.strip().split(' ')
+            vocab.append(row[0])
+            embd.append(row[1:])
+        print('Loaded GloVe!')
+        file.close()
+        return vocab, embd
 
-    def train(self, x_train, y_train, x_dev, y_dev, vocab_processor):
+    def train(self, x_train, y_train, x_dev, y_dev, vocab_processor, embedding):
         with tf.Graph().as_default():
             session_conf = tf.ConfigProto(allow_soft_placement=FLAGS.allow_soft_placement, log_device_placement=FLAGS.log_device_placement)
             sess = tf.Session(config=session_conf)
@@ -453,7 +470,8 @@ class Train:
                     feed_dict = {
                         cnn.input_x: x_batch,
                         cnn.input_y: y_batch,
-                        cnn.dropout_keep_prob: FLAGS.dropout_keep_prob
+                        cnn.dropout_keep_prob: FLAGS.dropout_keep_prob,
+                        cnn.embedding_placeholder: embedding
                     }
                     _, step, summaries, loss, accuracy = sess.run(
                         [train_op, global_step, train_summary_op, cnn.loss, cnn.accuracy],
@@ -469,7 +487,8 @@ class Train:
                     feed_dict = {
                         cnn.input_x: x_batch,
                         cnn.input_y: y_batch,
-                        cnn.dropout_keep_prob: 1.0
+                        cnn.dropout_keep_prob: 1.0,
+                        cnn.embedding_placeholder: embedding
                     }
                     step, summaries, loss, accuracy = sess.run([global_step, dev_summary_op, cnn.loss, cnn.accuracy], feed_dict)
                     time_str = datetime.datetime.now().isoformat()
@@ -530,11 +549,17 @@ class Train:
         data = DataHelpers().sentence_cut(data=data, dict=True)
         data[['sentence_seq']].to_csv('D:/Data/sentence/train.csv', encoding='utf8', index=False)
 
+        vocab, embd = self.load_word2vec(FLAGS.pretrained_word_emb)
+        vocab_size = len(vocab)
+        embedding_dim = len(embd[0])
+        embedding = np.asarray(embd)
+
         # Build vocabulary
         # max_document_length = max([len(x.split(" ")) for x in x_text])
         max_document_length = FLAGS.sentence_len
         vocab_processor = learn.preprocessing.VocabularyProcessor(max_document_length, min_frequency=2)
-        vocab_processor.fit(data['sentence_seq'])
+        # vocab_processor.fit(data['sentence_seq'])
+        vocab_processor.fit(vocab)
         # x = np.array(list(vocab_processor.fit_transform(x_text)))
         x = np.array(list(vocab_processor.transform(data['sentence_seq'])))
 
@@ -564,11 +589,11 @@ class Train:
         y_train, y_dev = y_shuffled[:dev_sample_index], y_shuffled[dev_sample_index:]
         del x, y, x_shuffled, y_shuffled
 
-        return x_train, y_train, x_dev, y_dev, vocab_processor
+        return x_train, y_train, x_dev, y_dev, vocab_processor, embedding
 
 
 if __name__ == '__main__':
     # 模型训练
     obj_train = Train()
-    x_train, y_train, x_dev, y_dev, vocab_processor = obj_train.preprocess()
-    obj_train.train(x_train, y_train, x_dev, y_dev, vocab_processor)
+    x_train, y_train, x_dev, y_dev, vocab_processor, embedding = obj_train.preprocess()
+    obj_train.train(x_train, y_train, x_dev, y_dev, vocab_processor, embedding)
