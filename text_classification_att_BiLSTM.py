@@ -30,6 +30,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 # tf.flags.DEFINE_string("model_data_path", "H:/tb/project0/quora/model/", "model path for storing.")
 # tf.flags.DEFINE_string("train_data_file", "E:/data/quora-duplicate/train.tsv", "train data path.")
 tf.flags.DEFINE_string("train_data_file", "D:/DF/sentence_theme_based_sentiment/data/train.csv", "train data path.")
+tf.flags.DEFINE_string("test_data_file", "D:/DF/sentence_theme_based_sentiment/data/test_public.csv", "train data path.")
 tf.flags.DEFINE_string("dictionary", "./utils/dictionary.txt", "dictionary path.")
 tf.flags.DEFINE_string("stoplist", "./utils/stoplist.txt", "stoplist path.")
 tf.flags.DEFINE_string("pretrained_word_emb", "./utils/word2vec.txt", "stoplist path.")
@@ -109,7 +110,11 @@ class DataHelpers:
                       '了', '的', '也', '哦', '这个', '啊', '说', '知道', '哪里', '吧', '哪家',
                       '想', '啥', '怎么', '呢', '那', '嘛', '么',
                       '有', '指', '楼主', '私信', '谁', '可能', '像', '这样', '到底', '哪个', '看', '我们',
-                      '只能', '主要', '些', '认为', '肯定',
+                      '只能', '主要', '些', '认为', '肯定', '森', '来说', '觉得',
+                      '确实', '一些', '而且', '一点', '比较', '个人', '感受', '适时', '开过',
+                      '汉兰达', '森林人', '冠道', '昂科威', '楼兰',
+                      '.', '。', ',', '，', '？', '?', '!', '！', '；', ';', ':', '：', '"', '\'', '“', '”',
+                      '·', '~', '@', '#', '=', '+', '（', '）', '(', ')', '[', ']', '【', '】', '*', '&', '…', '^', '%',
                       ]
 
         # Clean the text
@@ -184,17 +189,19 @@ class Text_BiLSTM(object):
     Uses an embedding layer, followed by a convolutional, max-pooling and softmax layer.
     """
 
-    def __init__(self, sequence_length, num_classes, vocab_size, embedding_size, l2_reg_lambda=0.0):
+    def __init__(self, sequence_length, num_classes, vocab_size, embedding_size, pretrained_embedding=None, l2_reg_lambda=0.0):
         self.sequence_length = sequence_length
         self.num_classes = num_classes
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
+        self.pretrained_embedding = pretrained_embedding
         self.l2_reg_lambda = l2_reg_lambda
 
         # Placeholders for input, output and dropout
         self.input_x = tf.placeholder(tf.int32, [None, self.sequence_length], name="input_right")
         self.input_y = tf.placeholder(tf.float32, [None, self.num_classes], name="input_y")
         self.dropout_keep_prob = tf.placeholder(tf.float32, name="dropout_keep_prob")
+        self.learning_rate = tf.placeholder(tf.float32, name="learning_rate")
         self.embedding_placeholder = tf.placeholder(tf.float32, [self.vocab_size, self.embedding_size], name="pretrained_emb")
 
         # with tf.device('/cpu:0'), tf.name_scope("embedding"):
@@ -339,6 +346,34 @@ class Text_BiLSTM(object):
                 correct_pred = tf.equal(tf.argmax(self.input_y, 1), self.y_pred_cls)
                 self.accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
 
+            # Define Training procedure
+            self.global_step = tf.Variable(0, name="global_step", trainable=False)
+            optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
+            grads_and_vars = optimizer.compute_gradients(self.loss)
+            self.train_op = optimizer.apply_gradients(grads_and_vars, global_step=self.global_step)
+
+            # Keep track of gradient values and sparsity (optional)
+            grad_summaries = []
+            for g, v in grads_and_vars:
+                if g is not None:
+                    grad_hist_summary = tf.summary.histogram("{}/grad/hist".format(v.name), g)
+                    sparsity_summary = tf.summary.scalar("{}/grad/sparsity".format(v.name), tf.nn.zero_fraction(g))
+                    grad_summaries.append(grad_hist_summary)
+                    grad_summaries.append(sparsity_summary)
+            self.grad_summaries_merged = tf.summary.merge(grad_summaries)
+
+            # Summaries for loss and accuracy
+            self.loss_summary = tf.summary.scalar("loss", self.loss)
+            self.acc_summary = tf.summary.scalar("accuracy", self.accuracy)
+
+            # Train Summaries
+            self.train_summary_op = tf.summary.merge([self.loss_summary, self.acc_summary, self.grad_summaries_merged])
+
+
+            # Dev summaries
+            self.dev_summary_op = tf.summary.merge([self.loss_summary, self.acc_summary])
+
+
     def project_layer_op(self):
         with tf.variable_scope("proj"):
             W = tf.get_variable(name="W",
@@ -369,9 +404,11 @@ class Text_BiLSTM(object):
             # self._word_embeddings = tf.Variable(tf.random_uniform([self.vocab_size, self.embedding_size], -1.0, 1.0), dtype=tf.float32, trainable=True, name="W_emb")
             # word_embeddings = tf.nn.embedding_lookup(params=self._word_embeddings, ids=self.input_x, name="word_embeddings")
 
-            W = tf.Variable(tf.constant(0.0, shape=[self.vocab_size, self.embedding_size]), trainable=False, name="W")
-            embedding_init = W.assign(self.embedding_placeholder)
-            word_embeddings = tf.nn.embedding_lookup(params=W, ids=self.input_x, name="word_embeddings")
+            self._word_embeddings = tf.Variable(self.pretrained_embedding, trainable=True, dtype=tf.float32, name="embedding")
+            word_embeddings = tf.nn.embedding_lookup(params=self._word_embeddings, ids=self.input_x, name="word_embeddings")
+            # W = tf.Variable(tf.constant(0.0, shape=[self.vocab_size, self.embedding_size]), trainable=True, name="W")
+            # self.embedding_init = W.assign(self.embedding_placeholder)
+            # word_embeddings = tf.nn.embedding_lookup(params=W, ids=self.input_x, name="word_embeddings")
 
         self.word_embeddings = tf.nn.dropout(word_embeddings, self.dropout_keep_prob)
 
@@ -390,16 +427,21 @@ class Train:
         vocab = []
         embd = []
         file = open(filename, 'r', encoding='utf8')
+        print('Word2Vec start')
         for line in file.readlines():
             row = line.strip().split(' ')
             vocab.append(row[0])
             embd.append(row[1:])
-        print('Loaded GloVe!')
+            # print(len(row[1:]))
+        print('Loaded Word2Vec!')
         file.close()
         return vocab, embd
 
-    def train(self, x_train, y_train, x_dev, y_dev, vocab_processor, embedding):
+    def train(self, x_train, y_train, x_dev, y_dev, x_test, vocab_processor, vocab_size, embedding):
+        print("length of len(vocab_processor.vocabulary_) is {0}".format(vocab_size))
         with tf.Graph().as_default():
+            self.lr = FLAGS.lr
+
             session_conf = tf.ConfigProto(allow_soft_placement=FLAGS.allow_soft_placement, log_device_placement=FLAGS.log_device_placement)
             sess = tf.Session(config=session_conf)
             # sess = tf.Session()
@@ -410,43 +452,22 @@ class Train:
                 #     embedding_size=FLAGS.embedding_dim)
                 cnn = Text_BiLSTM(sequence_length=x_train.shape[1],
                               num_classes=FLAGS.subject_sentiment_class,
-                              vocab_size=len(vocab_processor.vocabulary_),
-                              embedding_size=FLAGS.embedding_dim)
+                              # vocab_size=len(vocab_processor.vocabulary_),
+                              vocab_size=vocab_size,
+                              embedding_size=FLAGS.embedding_dim,
+                              pretrained_embedding=embedding)
 
-                # Define Training procedure
-                global_step = tf.Variable(0, name="global_step", trainable=False)
-                optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.lr)
-                grads_and_vars = optimizer.compute_gradients(cnn.loss)
-                train_op = optimizer.apply_gradients(grads_and_vars, global_step=global_step)
                 # train_op = tf.train.AdamOptimizer(learning_rate=FLAGS.lr, beta1=0.9, beta2=0.999,
                 #                                         epsilon=1e-8).minimize(cnn.loss)
-
-                # Keep track of gradient values and sparsity (optional)
-                grad_summaries = []
-                for g, v in grads_and_vars:
-                    if g is not None:
-                        grad_hist_summary = tf.summary.histogram("{}/grad/hist".format(v.name), g)
-                        sparsity_summary = tf.summary.scalar("{}/grad/sparsity".format(v.name), tf.nn.zero_fraction(g))
-                        grad_summaries.append(grad_hist_summary)
-                        grad_summaries.append(sparsity_summary)
-                grad_summaries_merged = tf.summary.merge(grad_summaries)
 
                 # Output directory for models and summaries
                 timestamp = str(int(time.time()))
                 out_dir = os.path.abspath(os.path.join(os.path.curdir, "runs", timestamp))
                 print("Writing to {}\n".format(out_dir))
 
-                # Summaries for loss and accuracy
-                loss_summary = tf.summary.scalar("loss", cnn.loss)
-                acc_summary = tf.summary.scalar("accuracy", cnn.accuracy)
-
-                # Train Summaries
-                train_summary_op = tf.summary.merge([loss_summary, acc_summary, grad_summaries_merged])
                 train_summary_dir = os.path.join(out_dir, "summaries", "train")
                 train_summary_writer = tf.summary.FileWriter(train_summary_dir, sess.graph)
 
-                # Dev summaries
-                dev_summary_op = tf.summary.merge([loss_summary, acc_summary])
                 dev_summary_dir = os.path.join(out_dir, "summaries", "dev")
                 dev_summary_writer = tf.summary.FileWriter(dev_summary_dir, sess.graph)
 
@@ -462,7 +483,7 @@ class Train:
 
                 # Initialize all variables
                 sess.run(tf.global_variables_initializer())
-
+                # sess.run(cnn.embedding_init, feed_dict={cnn.embedding_placeholder: embedding})
                 def train_step(x_batch, y_batch):
                     """
                     A single training step
@@ -471,11 +492,9 @@ class Train:
                         cnn.input_x: x_batch,
                         cnn.input_y: y_batch,
                         cnn.dropout_keep_prob: FLAGS.dropout_keep_prob,
-                        cnn.embedding_placeholder: embedding
+                        cnn.learning_rate: self.lr
                     }
-                    _, step, summaries, loss, accuracy = sess.run(
-                        [train_op, global_step, train_summary_op, cnn.loss, cnn.accuracy],
-                        feed_dict)
+                    _, step, summaries, loss, accuracy = sess.run([cnn.train_op, cnn.global_step, cnn.train_summary_op, cnn.loss, cnn.accuracy], feed_dict)
                     time_str = datetime.datetime.now().isoformat()
                     print("{}: step {}, loss {:g}, acc {:g}".format(time_str, step, loss, accuracy))
                     train_summary_writer.add_summary(summaries, step)
@@ -488,9 +507,9 @@ class Train:
                         cnn.input_x: x_batch,
                         cnn.input_y: y_batch,
                         cnn.dropout_keep_prob: 1.0,
-                        cnn.embedding_placeholder: embedding
+                        cnn.learning_rate: self.lr
                     }
-                    step, summaries, loss, accuracy = sess.run([global_step, dev_summary_op, cnn.loss, cnn.accuracy], feed_dict)
+                    step, summaries, loss, accuracy = sess.run([cnn.global_step, cnn.dev_summary_op, cnn.loss, cnn.accuracy], feed_dict)
                     time_str = datetime.datetime.now().isoformat()
                     # print("{}: step {}, loss {:g}, acc {:g}".format(time_str, step, loss, accuracy))
                     if writer:
@@ -503,7 +522,7 @@ class Train:
                 for batch in batches:
                     x_batch, y_batch = zip(*batch)
                     train_step(x_batch, y_batch)
-                    current_step = tf.train.global_step(sess, global_step)
+                    current_step = tf.train.global_step(sess, cnn.global_step)
                     if current_step % FLAGS.evaluate_every == 0:
                         dev_batches = DataHelpers().batch_iter(list(zip(x_dev, y_dev)), FLAGS.batch_size, 1)
                         total_dev_correct = 0
@@ -523,11 +542,25 @@ class Train:
                         path = saver.save(sess, checkpoint_prefix, global_step=current_step)
                         print("Saved model checkpoint to {}\n".format(path))
 
+                    if current_step % 300 == 0:
+                        self.lr = self.lr / 4
+
+                    if current_step % 100 == 0:
+                        break
+
+                feed_dict = {
+                    cnn.input_x: x_dev,
+                    cnn.dropout_keep_prob: 1.0,
+                }
+                y_pred = sess.run([cnn.y_pred_cls], feed_dict)
+                print(y_pred)
+
                 # self.show_prediction()
 
     def preprocess(self):
         # 读取训练数据
         data = pd.read_csv(FLAGS.train_data_file, sep=",", error_bad_lines=False)
+        test = pd.read_csv(FLAGS.test_data_file, sep=",", error_bad_lines=False)
 
         print(pd.value_counts(data['subject']))
         print(pd.value_counts(data['sentiment_value']))
@@ -544,24 +577,31 @@ class Train:
         # print("dictionary done!")
 
         data = data.fillna('空')
+        test = test.fillna('空')
 
         # 数据切分
         data = DataHelpers().sentence_cut(data=data, dict=True)
-        data[['sentence_seq']].to_csv('D:/Data/sentence/train.csv', encoding='utf8', index=False)
+        test = DataHelpers().sentence_cut(data=test, dict=True)
+        # data[['sentence_seq']].to_csv('D:/Data/sentence/train.csv', encoding='utf8', index=False)
 
         vocab, embd = self.load_word2vec(FLAGS.pretrained_word_emb)
         vocab_size = len(vocab)
         embedding_dim = len(embd[0])
         embedding = np.asarray(embd)
+        print(embedding.shape)
 
         # Build vocabulary
         # max_document_length = max([len(x.split(" ")) for x in x_text])
         max_document_length = FLAGS.sentence_len
-        vocab_processor = learn.preprocessing.VocabularyProcessor(max_document_length, min_frequency=2)
+        # vocab_processor = learn.preprocessing.VocabularyProcessor(max_document_length, min_frequency=2)
+        vocab_processor = learn.preprocessing.VocabularyProcessor(max_document_length)
         # vocab_processor.fit(data['sentence_seq'])
+        print('vocab')
+        print(vocab)
         vocab_processor.fit(vocab)
         # x = np.array(list(vocab_processor.fit_transform(x_text)))
         x = np.array(list(vocab_processor.transform(data['sentence_seq'])))
+        x_test = np.array(list(vocab_processor.transform(test['sentence_seq'])))
 
         # subject_dict = {'动力': 0, '价格': 1, '油耗': 2, '操控': 3, '舒适性': 4, '配置': 5, '安全性': 6, '内饰': 7, '外观': 8, '空间': 9}
         # subject_numerical = []
@@ -576,7 +616,6 @@ class Train:
         data['subject_senti'] = data['subject']+'_'+data['sentiment_value'].astype('str')
         subject_numerical = []
         for subject in data['subject_senti']:
-            print(subject)
             subject_numerical.append(subject_dict[subject])
         y = to_categorical(subject_numerical, num_classes=FLAGS.subject_sentiment_class)
 
@@ -589,11 +628,11 @@ class Train:
         y_train, y_dev = y_shuffled[:dev_sample_index], y_shuffled[dev_sample_index:]
         del x, y, x_shuffled, y_shuffled
 
-        return x_train, y_train, x_dev, y_dev, vocab_processor, embedding
+        return x_train, y_train, x_dev, y_dev, x_test, vocab_processor, vocab_size, embedding
 
 
 if __name__ == '__main__':
     # 模型训练
     obj_train = Train()
-    x_train, y_train, x_dev, y_dev, vocab_processor, embedding = obj_train.preprocess()
-    obj_train.train(x_train, y_train, x_dev, y_dev, vocab_processor, embedding)
+    x_train, y_train, x_dev, y_dev, x_test, vocab_processor, vocab_size, embedding = obj_train.preprocess()
+    obj_train.train(x_train, y_train, x_dev, y_dev, x_test, vocab_processor, vocab_size, embedding)
