@@ -7,6 +7,7 @@ import random
 import os
 import time
 import datetime
+import copy
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -31,6 +32,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 # tf.flags.DEFINE_string("train_data_file", "E:/data/quora-duplicate/train.tsv", "train data path.")
 tf.flags.DEFINE_string("train_data_file", "D:/DF/sentence_theme_based_sentiment/data/train.csv", "train data path.")
 tf.flags.DEFINE_string("test_data_file", "D:/DF/sentence_theme_based_sentiment/data/test_public.csv", "train data path.")
+tf.flags.DEFINE_string("result_file", "D:/DF/sentence_theme_based_sentiment/data/submission_result.csv", "train data path.")
 tf.flags.DEFINE_string("dictionary", "./utils/dictionary.txt", "dictionary path.")
 tf.flags.DEFINE_string("stoplist", "./utils/stoplist.txt", "stoplist path.")
 tf.flags.DEFINE_string("pretrained_word_emb", "./utils/word2vec.txt", "stoplist path.")
@@ -57,8 +59,8 @@ tf.flags.DEFINE_float("l2_reg_lambda", 0.2, "L2 regularization lambda (default: 
 tf.flags.DEFINE_integer("hidden_dim", 128, "Number of filters per filter size (default: 128)")
 
 # Training parameters
-tf.flags.DEFINE_integer("batch_size", 128, "Batch Size (default: 64)")
-tf.flags.DEFINE_integer("num_epochs", 300, "Number of training epochs (default: 200)")
+tf.flags.DEFINE_integer("batch_size", 256, "Batch Size (default: 64)")
+tf.flags.DEFINE_integer("num_epochs", 30000, "Number of training epochs (default: 200)")
 tf.flags.DEFINE_integer("evaluate_every", 100, "Evaluate model on dev set after this many steps (default: 100)")
 tf.flags.DEFINE_integer("checkpoint_every", 100, "Save model after this many steps (default: 100)")
 tf.flags.DEFINE_integer("num_checkpoints", 5, "Number of checkpoints to store (default: 5)")
@@ -437,6 +439,57 @@ class Train:
         file.close()
         return vocab, embd
 
+    def generate_extra_samples(self, rows, num):
+        extra_samples = []
+        print(rows)
+        for i in range(num):
+            row = random.sample(rows, 1)
+            extra_samples.extend(row)
+        return extra_samples
+
+    def over_sampling(self, x_train, y_train, label_distribution, dic_label, prop=1):
+        print("shape before upsampling is {0}".format(x_train.shape))
+        x_upsample = copy.deepcopy(x_train)
+        y_upsample = copy.deepcopy(y_train)
+        shape_x = x_train.shape
+        most_label = label_distribution.index[0]
+        # most_label_count = label_distribution[0]
+        for other_label in label_distribution.index:
+            # print(other_label)
+            if other_label == most_label:
+                rows_valid = []
+                for row in range(shape_x[0]):
+                    if (y_train[row, :] == dic_label[most_label]).all():
+                        rows_valid.append(row)
+                most_label_count = len(rows_valid)
+                print("most label is {0}, count is {1}".format(most_label, most_label_count))
+                # x_upsample = np.append(x_upsample, x_train[rows_valid, :], axis=0)
+                # y_upsample = np.append(y_upsample, y_train[rows_valid, :], axis=0)
+                pass
+            else:
+                rows_valid = []
+                for row in range(shape_x[0]):
+                    # print(y_train[row, :])
+                    # print(dic_label[other_label])
+                    if (y_train[row, :] == dic_label[other_label]).all():
+                        rows_valid.append(row)
+                # extra_sample = random.sample(rows_valid, int(prop * (most_label_count-label_distribution[other_label])))
+                extra_sample = self.generate_extra_samples(rows_valid, int(prop * (most_label_count-len(rows_valid))))
+                print("original label count is {0}".format(label_distribution[other_label]))
+                print("extra label count is {0}".format(len(extra_sample)))
+                x_upsample = np.append(x_upsample, x_train[extra_sample, :], axis=0)
+                print("shape is {0}".format(x_upsample.shape))
+                y_upsample = np.append(y_upsample, y_train[extra_sample, :], axis=0)
+        # x_upsample = np.append(x_upsample, x_train, axis=0)
+        # y_upsample = np.append(y_upsample, y_train, axis=0)
+
+        shuffle_indices = np.random.permutation(np.arange(y_upsample.shape[0]))
+        x_upsample = x_upsample[shuffle_indices]
+        print("shape is {0}".format(x_upsample.shape))
+        y_upsample = y_upsample[shuffle_indices]
+        print("shape after upsampling is {0}".format(x_upsample.shape))
+        return x_upsample, y_upsample
+
     def train(self, x_train, y_train, x_dev, y_dev, x_test, vocab_processor, vocab_size, embedding):
         print("length of len(vocab_processor.vocabulary_) is {0}".format(vocab_size))
         with tf.Graph().as_default():
@@ -545,7 +598,7 @@ class Train:
                     if current_step % 300 == 0:
                         self.lr = self.lr / 4
 
-                    if current_step % 100 == 0:
+                    if current_step % 700 == 0:
                         break
 
                 feed_dict = {
@@ -554,6 +607,19 @@ class Train:
                 }
                 y_pred = sess.run([cnn.y_pred_cls], feed_dict)
                 print(y_pred)
+
+                test = pd.read_csv(FLAGS.test_data_file, sep=",", error_bad_lines=False)
+                feed_dict = {
+                    cnn.input_x: x_test,
+                    cnn.dropout_keep_prob: 1.0,
+                }
+                y_pred = sess.run([cnn.y_pred_cls], feed_dict)
+                print(y_pred)
+                print(type(y_pred))
+                print(type(y_pred[0]))
+                print(type(y_pred[0].tolist()))
+                test['predict'] = y_pred[0].tolist()
+                test.to_csv(FLAGS.result_file, encoding='utf8', index=False)
 
                 # self.show_prediction()
 
@@ -614,10 +680,18 @@ class Train:
                         '动力_0': 10, '价格_0': 11, '油耗_0': 12, '操控_0': 13, '舒适性_0': 14, '配置_0': 15, '安全性_0': 16, '内饰_0': 17, '外观_0': 18, '空间_0': 19,
                         '动力_1': 20, '价格_1': 21, '油耗_1': 22, '操控_1': 23, '舒适性_1': 24, '配置_1': 25, '安全性_1': 26, '内饰_1': 27, '外观_1': 28, '空间_1': 29}
         data['subject_senti'] = data['subject']+'_'+data['sentiment_value'].astype('str')
+        label_distribution = pd.value_counts(data['subject_senti'])
+        print(label_distribution)
         subject_numerical = []
         for subject in data['subject_senti']:
             subject_numerical.append(subject_dict[subject])
         y = to_categorical(subject_numerical, num_classes=FLAGS.subject_sentiment_class)
+
+        dic1 = {}
+        for i in range(data.shape[0]):
+            if data.ix[i, 'subject_senti'] not in dic1.keys():
+                dic1.update({data.ix[i, 'subject_senti']: y[i, :]})
+        print("dictionary label is {0}".format(dic1))
 
         shuffle_indices = np.random.permutation(np.arange(len(y)))
         x_shuffled = x[shuffle_indices]
@@ -626,6 +700,7 @@ class Train:
         dev_sample_index = -1 * int(FLAGS.dev_sample_percentage * float(len(y)))
         x_train, x_dev = x_shuffled[:dev_sample_index], x_shuffled[dev_sample_index:]
         y_train, y_dev = y_shuffled[:dev_sample_index], y_shuffled[dev_sample_index:]
+        x_train, y_train = self.over_sampling(x_train, y_train, label_distribution, dic1, prop=1)
         del x, y, x_shuffled, y_shuffled
 
         return x_train, y_train, x_dev, y_dev, x_test, vocab_processor, vocab_size, embedding
